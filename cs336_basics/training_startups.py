@@ -1,10 +1,91 @@
-from typing import List, Tuple, Dict, ByteString
-from pretokenization_example import find_chunk_boundaries
+from typing import List, Tuple
 import regex as re
 from collections import defaultdict
-from functools import cmp_to_key
-import json
 import time
+from sortedcontainers import SortedList
+from collections import Counter
+import os, json
+from typing import BinaryIO
+from common import gpt2_bytes_to_unicode
+
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+class BPEVocab:
+    def __init__(self):
+        self.sorted_pairs = SortedList(key=lambda x: (x[1], x[0]))
+        self.pair_counts = Counter()
+        
+    def push(self, pair, count):
+        # 如果已存在，先删除
+        if pair in self.pair_counts:
+            old_count = self.pair_counts[pair]
+            self.sorted_pairs.remove((pair, old_count))
+        
+        # 添加新的
+        self.pair_counts[pair] = count
+        self.sorted_pairs.add((pair, count))
+        
+    def get_most_frequent(self):
+        if self.sorted_pairs:
+            return self.sorted_pairs[-1]
+        return None
+
+    def get_count_by_pair(self, pair):
+        """输入pair获取count"""
+        if pair in self.pair_counts:
+            return self.pair_counts[pair]
+        return 0
+
+    def add_count(self, pair, count):
+        """基于某个pair增加coun，可以是负数"""
+        old_count = self.get_count_by_pair(pair)
+        new_count = old_count + count if old_count + count > 0 else 0
+        self.push(pair,new_count)
+
 
 class BPETrainer:
     def __init__(self, input_path: str, vocab_size: int, special_tokens: List[str]):
@@ -15,13 +96,16 @@ class BPETrainer:
         
         ## Step-1: 预分词
         self.pre_tokenized_text_list = self.parallel_pre_tokenization()
-        self.bytepair_counting_dict = defaultdict(int) # 维护一个统计表
+        self.bytepair_counting_dict = BPEVocab()
 
         ## Step-2: 初始化词表
-        self.BPE_TOKEN_TABLE = {}    
+        self.vocab = {}
+        self.merges = []
+        # add special tokens to vacab firstly
+        for special_token in special_tokens:
+            self.vocab[len(self.vocab)] = special_token.encode("utf-8")
         for i in range(256):
-            self.BPE_TOKEN_TABLE[i] = bytes([i])
-        # print("#########【测试点位-1】：初始化词表\n", self.BPE_TOKEN_TABLE, "\n\n\n")
+            self.vocab[len(self.vocab)] = bytes([i])
 
         ## Step-3: 迭代训练
         self.train_bpe()
@@ -94,9 +178,11 @@ class BPETrainer:
             # 更新左边
             if j >= 1:
                 left_pair = word_tokenizing[j-1]
-                self.bytepair_counting_dict[left_pair] -= source_word_count
+                # self.bytepair_counting_dict[left_pair] -= source_word_count
+                self.bytepair_counting_dict.add_count(left_pair, -source_word_count)
                 new_left_pair = (left_pair[0], new_token)
-                self.bytepair_counting_dict[new_left_pair] += source_word_count
+                # self.bytepair_counting_dict[new_left_pair] += source_word_count
+                self.bytepair_counting_dict.add_count(new_left_pair, source_word_count)
                 # 反查列表，new_left_pair要新增，left_pair要删减
                 self.bytepair_from_words_index[new_left_pair].append(index)
                 # 更新word_tokenizing状态，left_pair -> new_left_pair
@@ -111,9 +197,11 @@ class BPETrainer:
 
             if j <= len(word_tokenizing)-2:
                 right_pair = word_tokenizing[j+1]
-                self.bytepair_counting_dict[right_pair] -= source_word_count
+                # self.bytepair_counting_dict[right_pair] -= source_word_count
+                self.bytepair_counting_dict.add_count(right_pair, -source_word_count)
                 new_right_pair = (new_token, right_pair[1])
-                self.bytepair_counting_dict[new_right_pair] += source_word_count
+                # self.bytepair_counting_dict[new_right_pair] += source_word_count
+                self.bytepair_counting_dict.add_count(new_right_pair, source_word_count)
                 # 反查index的列表，新增new pair
                 self.bytepair_from_words_index[new_right_pair].append(index)
                 word_tokenizing[j+1] = new_right_pair
@@ -135,10 +223,10 @@ class BPETrainer:
         # 删除被合并的词组的倒查索引列表
         del self.bytepair_from_words_index[most_frequent_pair]
         # 删除字节对
-        del self.bytepair_counting_dict[most_frequent_pair]
+        self.bytepair_counting_dict.push(most_frequent_pair, 0)
 
         # 更新词表
-        self.BPE_TOKEN_TABLE[len(self.BPE_TOKEN_TABLE)] = new_token
+        self.vocab[len(self.vocab)] = new_token
     
 
     def train_bpe(self):
@@ -164,7 +252,8 @@ class BPETrainer:
             for i in range(len(word_split)-1):
                 byte_pair = (word_split[i], word_split[i+1])
                 word_tokenizing.append(byte_pair)
-                self.bytepair_counting_dict[byte_pair] += counts
+                self.bytepair_counting_dict.add_count(byte_pair, counts)
+                # self.bytepair_counting_dict[byte_pair] += counts
                 self.bytepair_from_words_index[byte_pair].append(len(self.words_tokenizing_states))
             self.words_tokenizing_states.append(word_tokenizing)
         # print("#########【测试点位-3】：分词状态列表\n", self.words_tokenizing_states, "\n\n\n")
@@ -172,31 +261,29 @@ class BPETrainer:
         
         # 2025.12.29 基于已经初始化的内容
         # 反复merge
-        TABLE_SIZE = len(self.BPE_TOKEN_TABLE)
-        idx = 256
         iter_time = 0
-        print(f"##### 初始化的bytepair统计表：{self.bytepair_counting_dict}\n\n\n")
-        while TABLE_SIZE <= self.vocab_size:
+        # print(f"##### 初始化的bytepair统计表：{self.bytepair_counting_dict}\n\n\n")
+        while len(self.vocab) < self.vocab_size:
             iter_time += 1
             # 找到统计次数最多的词表
-            # 找出所有counts最多的byte pairs
-            max_count = max(self.bytepair_counting_dict.values())
-            most_frequent_pairs = [pair for pair, count in self.bytepair_counting_dict.items() if count == max_count]
+            # # 找出所有counts最多的byte pairs
+            # max_count = max(self.bytepair_counting_dict.values())
+            # most_frequent_pairs = [pair for pair, count in self.bytepair_counting_dict.items() if count == max_count]
             ## 根据字典序找出其中一个pair，max天然就是字典序找最大
             # 先比较第一个元素，在比较第二个
-            most_frequent_pair = max(most_frequent_pairs)
-            print(f"Iter-{iter_time} 当前最频繁pair: ", most_frequent_pair, max_count)
+            # most_frequent_pair = max(most_frequent_pairs)
+            most_frequent_pair, max_count = self.bytepair_counting_dict.get_most_frequent()
+            self.merges.append(most_frequent_pair)
+            
+            # print(f"Iter-{iter_time} 当前最频繁pair: ", most_frequent_pair, max_count)
             # print(f"#########【测试点位-5】：最频繁的bytepair\nIter-{iter_time}, most frequent pairs: ({most_frequent_pair}), count: {max_count}\n\n")
             self.merge_and_update_bytepair(most_frequent_pair)
-            print(f"##### Iter-{iter_time}：\n最频繁的pair是：{most_frequent_pair}\n\n\n")
-            TABLE_SIZE += 1
-        print("完成后的词表：\n", self.BPE_TOKEN_TABLE)
+            # print(f"##### Iter-{iter_time}：\n最频繁的pair是：{most_frequent_pair}\n\n\n")
+        # print("完成后的词表：\n", self.vocab)
+
 
 if __name__ == "__main__":
     start_time = time.time()
-    vocab_size = 1000
-    obj = BPETrainer(input_path="datasets/TinyStoriesV2-GPT4-valid.txt", vocab_size=vocab_size, special_tokens=["<|endoftext|>"])
+    vocab_size = 500
+    obj = BPETrainer(input_path="tests/fixtures/corpus.en", vocab_size=vocab_size, special_tokens=["<|endoftext|>"])
     print(f"目标词表大小：{vocab_size}, 耗时{time.time() - start_time}")
-
-    ## 测试样例
-    # test_obj = BPETrainer(input_path="datasets/test-sentences.txt", vocab_size=260, special_tokens=["<|endoftext|>"])
