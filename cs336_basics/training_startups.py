@@ -6,7 +6,6 @@ from sortedcontainers import SortedList
 from collections import Counter
 import os, json
 from typing import BinaryIO
-from common import gpt2_bytes_to_unicode
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -146,10 +145,10 @@ class BPETrainer:
 
     def merge_bytepair_to_source_word(self, word_tokenizing:list):
         """从一个分词状态，反推出原单词"""
-        source_word = word_tokenizing[0][0].decode("utf-8") + word_tokenizing[0][1].decode("utf-8")
+        word_encoding = word_tokenizing[0][0] + word_tokenizing[0][1]
         for i in range(1,len(word_tokenizing)):
-            source_word += word_tokenizing[i][1].decode("utf-8")
-        
+            word_encoding += word_tokenizing[i][1]
+        source_word = word_encoding.decode("utf-8")
         return source_word
 
 
@@ -209,7 +208,7 @@ class BPETrainer:
                 # 删去旧的
                 del_idx = 0
                 if right_pair == most_frequent_pair:
-                    print("触发midle和right pair一样的情况: ", word_tokenizing)
+                    # print("触发midle和right pair一样的情况: ", word_tokenizing)
                     del_idx = pos+1
                 while del_idx < len(self.bytepair_from_words_index[right_pair]):
                     if self.bytepair_from_words_index[right_pair][del_idx] == index:
@@ -237,7 +236,6 @@ class BPETrainer:
         for pre_tokenized_text in self.pre_tokenized_text_list:
             for word in pre_tokenized_text:
                 self.words_counting[word] += 1
-        # print("#########【测试点位-2】：词统计\n", self.words_counting, "\n\n\n")
         
         # 2025.12.28 写完了初始化
         # 维护一个word列表，使得byte-pair可以反查出自哪个index
@@ -245,7 +243,10 @@ class BPETrainer:
         self.words_tokenizing_states = []
         for word, counts in self.words_counting.items():
             # 对每个word进行encoding -> 其实是基于已有的词表进行分词
-            word_split = [ch.encode("utf-8") for ch in word]
+            # word_split = [ch.encode("utf-8") for ch in word] # 基于词做encoding - 失败
+            word_encoding = word.encode("utf-8")
+            word_split = [word_encoding[i:i+1] for i in range(len(word_encoding))]# 使用切片保持 bytes 类型
+            
             if len(word_split) <= 1: # 只有一个字母的没办法构成byte-pair
                 continue
             word_tokenizing = []
@@ -284,6 +285,6 @@ class BPETrainer:
 
 if __name__ == "__main__":
     start_time = time.time()
-    vocab_size = 500
-    obj = BPETrainer(input_path="tests/fixtures/corpus.en", vocab_size=vocab_size, special_tokens=["<|endoftext|>"])
+    vocab_size = 1000
+    obj = BPETrainer(input_path="tests/fixtures/tinystories_sample_5M.txt", vocab_size=vocab_size, special_tokens=["<|endoftext|>"])
     print(f"目标词表大小：{vocab_size}, 耗时{time.time() - start_time}")

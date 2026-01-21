@@ -591,4 +591,4 @@ def run_train_bpe(
     """
     from cs336_basics.training_startups import BPETrainer
     obj = BPETrainer(input_path=input_path, vocab_size=vocab_size, special_tokens=special_tokens)
-    return obj.merges, obj.vocab
+    return obj.vocab, obj.merges
