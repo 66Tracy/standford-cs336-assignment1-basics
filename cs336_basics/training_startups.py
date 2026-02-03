@@ -6,6 +6,94 @@ from sortedcontainers import SortedList
 from collections import Counter
 import os, json
 from typing import BinaryIO
+import heapq
+from typing import Tuple, Optional, List
+from collections import Counter
+from itertools import chain
+
+class _HeapItem:
+    """
+    堆元素包装器，实现以下排序逻辑：
+    1. count降序
+    2. pair字典序降序
+    """
+    __slots__ = ['neg_count', 'pair', 'count']
+
+    def __init__(self, pair: Tuple[bytes, bytes], count: int):
+        self.pair = pair
+        self.count = count
+        self.neg_count = -count
+    
+    def __lt__(self, other: '_HeapItem') -> bool:
+        if self.neg_count != other.neg_count:
+            return self.neg_count < other.neg_count
+        
+        return self.pair > other.pair
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _HeapItem):
+            return NotImplemented
+        return self.neg_count == other.neg_count and self.pari == other.pair
+
+class BytePairMaxHeap:
+    """
+    大顶堆，维护(pair, count)的降序，count相同时按pair的字典序排序
+    """
+
+    __slots__ = ['_heap']
+
+    def __init__(self):
+        self._heap: List[_HeapItem] = []
+
+    def push(self, pair: Tuple[bytes, bytes], count: int) -> None:
+        """
+        压入一个新的pair
+        """
+        heapq.heappush(self._heap, _HeapItem(pair, count))
+
+    def pop_most_frequent(self) -> Optional[Tuple[Tuple[bytes, bytes], int]]:
+        """
+        弹出最频繁的pair
+        返回：pair, count
+        """
+        if not self._heap:
+            return None
+        item = heapq.heappop(self._heap)
+        return item.pair, item.count      
+
+    def __len__(self) -> int:
+        return len(self._heap)
+    
+    def is_empty(self) -> bool:
+        return len(self._heap) == 0
+
+class BPEVocab(BytePairMaxHeap):
+    def __init__(self):
+        """
+        继承__slots__类型的堆结构
+        外层构造dict类型，提高内存效率
+        """
+        super().__init__()
+        self.valid_counts = {}
+    
+    def push(self, pair, count):
+        self.valid_counts[pair] = count
+        super().push(pair, count)
+    
+    def pop_most_frequent_valid(self):
+        while self._heap:
+            pair, count = super().pop_most_frequent()
+            if self.valid_counts.get(pair, 0) == count:
+                return pair, count
+        return None
+
+    def add_count(self, pair, count):
+        """基于某个pair增加count，可以是负数"""
+        old_count = self.valid_counts.get(pair, 0)
+        new_count = old_count + count if old_count + count > 0 else 0
+        self.push(pair,new_count)
+
+
 
 def find_chunk_boundaries(
     file: BinaryIO,
@@ -53,38 +141,6 @@ def find_chunk_boundaries(
     # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
     return sorted(set(chunk_boundaries))
 
-class BPEVocab:
-    def __init__(self):
-        self.sorted_pairs = SortedList(key=lambda x: (x[1], x[0]))
-        self.pair_counts = Counter()
-        
-    def push(self, pair, count):
-        # 如果已存在，先删除
-        if pair in self.pair_counts:
-            old_count = self.pair_counts[pair]
-            self.sorted_pairs.remove((pair, old_count))
-        
-        # 添加新的
-        self.pair_counts[pair] = count
-        self.sorted_pairs.add((pair, count))
-        
-    def get_most_frequent(self):
-        if self.sorted_pairs:
-            return self.sorted_pairs[-1]
-        return None
-
-    def get_count_by_pair(self, pair):
-        """输入pair获取count"""
-        if pair in self.pair_counts:
-            return self.pair_counts[pair]
-        return 0
-
-    def add_count(self, pair, count):
-        """基于某个pair增加coun，可以是负数"""
-        old_count = self.get_count_by_pair(pair)
-        new_count = old_count + count if old_count + count > 0 else 0
-        self.push(pair,new_count)
-
 
 class BPETrainer:
     def __init__(self, input_path: str, vocab_size: int, special_tokens: List[str]):
@@ -107,7 +163,7 @@ class BPETrainer:
             self.vocab[len(self.vocab)] = bytes([i])
 
         ## Step-3: 迭代训练
-        self.train_bpe()
+        # self.train_bpe()
 
     def split_with_special_tokens(self, chunk: str, special_tokens:List[str]):
         """根据special tokens将chunk划分成一篇篇独立的文章"""
@@ -127,7 +183,6 @@ class BPETrainer:
         with open(self.file_path, "rb") as f:
             num_processes = 4
             boundaries = find_chunk_boundaries(f, num_processes, b"<|endoftext|>")
-            print("boundaries: ", boundaries)
 
             # The following is a serial implementation, but you can parallelize this
             # by sending each start/end pair to a set of processes.\
@@ -227,16 +282,25 @@ class BPETrainer:
         # 更新词表
         self.vocab[len(self.vocab)] = new_token
     
-
-    def train_bpe(self):
-        """训练bpe流程"""
-        ## sub-step-1: 预统计，开始循环merge之前，获取第一版统计信息
+    def _init_words_counting(self):
+        """
+        统计语料片段里每个词的统计次数
+        """
         ## TODO: 这里是不是也可以并行
         self.words_counting = defaultdict(int)
         for pre_tokenized_text in self.pre_tokenized_text_list:
             for word in pre_tokenized_text:
                 self.words_counting[word] += 1
-        
+
+    # def _init_words_counting(self):
+    #     # 将嵌套列表展平后一次性计数，避免 Python 层级的显式循环
+    #     self.words_counting = Counter(chain.from_iterable(self.pre_tokenized_text_list))
+
+    def _inital_states(self):
+        """
+        构建每个word的分词状态记忆列表：self.words_tokenizing_states
+        构建根据词索引反查bytepair所在word：self.bytepair_from_words_index
+        """
         # 2025.12.28 写完了初始化
         # 维护一个word列表，使得byte-pair可以反查出自哪个index
         self.bytepair_from_words_index = defaultdict(list)
@@ -257,33 +321,29 @@ class BPETrainer:
                 # self.bytepair_counting_dict[byte_pair] += counts
                 self.bytepair_from_words_index[byte_pair].append(len(self.words_tokenizing_states))
             self.words_tokenizing_states.append(word_tokenizing)
-        # print("#########【测试点位-3】：分词状态列表\n", self.words_tokenizing_states, "\n\n\n")
-        # print("#########【测试点位-4】：bytepair倒查索引列表\n", self.bytepair_from_words_index, "\n\n\n")
+    
+
+    def train_bpe(self):
+        """训练bpe流程"""
+        ## sub-step-1: 预统计，开始循环merge之前，获取第一版统计信息
+        self._init_words_counting()
+        
+        self._inital_states()
         
         # 2025.12.29 基于已经初始化的内容
         # 反复merge
         iter_time = 0
-        # print(f"##### 初始化的bytepair统计表：{self.bytepair_counting_dict}\n\n\n")
         while len(self.vocab) < self.vocab_size:
             iter_time += 1
-            # 找到统计次数最多的词表
-            # # 找出所有counts最多的byte pairs
-            # max_count = max(self.bytepair_counting_dict.values())
-            # most_frequent_pairs = [pair for pair, count in self.bytepair_counting_dict.items() if count == max_count]
-            ## 根据字典序找出其中一个pair，max天然就是字典序找最大
-            # 先比较第一个元素，在比较第二个
-            # most_frequent_pair = max(most_frequent_pairs)
-            most_frequent_pair, max_count = self.bytepair_counting_dict.get_most_frequent()
+            # 找到最frequent的bytepair
+            most_frequent_pair, max_count = self.bytepair_counting_dict.pop_most_frequent()
             self.merges.append(most_frequent_pair)
-            
-            # print(f"Iter-{iter_time} 当前最频繁pair: ", most_frequent_pair, max_count)
-            # print(f"#########【测试点位-5】：最频繁的bytepair\nIter-{iter_time}, most frequent pairs: ({most_frequent_pair}), count: {max_count}\n\n")
+            # 完成合并
             self.merge_and_update_bytepair(most_frequent_pair)
-            # print(f"##### Iter-{iter_time}：\n最频繁的pair是：{most_frequent_pair}\n\n\n")
-        # print("完成后的词表：\n", self.vocab)
 
 
 if __name__ == "__main__":
+
     start_time = time.time()
     vocab_size = 1000
     obj = BPETrainer(input_path="tests/fixtures/tinystories_sample_5M.txt", vocab_size=vocab_size, special_tokens=["<|endoftext|>"])

@@ -1,131 +1,106 @@
-from typing import List, ByteString
-from functools import cmp_to_key
+import heapq
+from typing import Tuple, Optional, List
 
-class BytePair:
-    """字节对类型"""
-    left: ByteString
-    right: ByteString
+class _HeapItem:
+    """
+    堆元素包装器，实现以下排序逻辑：
+    1. count降序
+    2. pair字典序降序
+    """
+    __slots__ = ['neg_count', 'pair', 'count']
 
-    def __init__(self, left: ByteString, right: ByteString):
-        self.left = left
-        self.right = right
+    def __init__(self, pair: Tuple[bytes, bytes], count: int):
+        self.pair = pair
+        self.count = count
+        self.neg_count = -count
     
-    def __getitem__(self, index: int) -> ByteString:
-        """支持索引访问"""
-        if index == 0:
-            return self.left
-        elif index == 1:
-            return self.right
-        elif isinstance(index, slice):
-            # 支持切片
-            return (self.left, self.right)[index]
-        else:
-            raise IndexError(f"Index {index} out of range for BytePair")
-    
-    def __len__(self) -> int:
-        """支持 len() 函数"""
-        return 2
-    
-    def __repr__(self):
-        return f"BytePair({self.left!r}, {self.right!r})"
-    
-    def __str__(self):
-        return f"({self.left},{self.right})"
+    def __lt__(self, other: '_HeapItem') -> bool:
+        if self.neg_count != other.neg_count:
+            return self.neg_count < other.neg_count
+        
+        return self.pair > other.pair
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _HeapItem):
+            return NotImplemented
+        return self.neg_count == other.neg_count and self.pari == other.pair
 
-def merge_bytepair_to_source_word(word_tokening:list):
-    """从一个分词状态，反推出原单词"""
-    source_word = bytes(word_tokening[0][0]).decode("utf-8") + bytes(word_tokening[0][1]).decode("utf-8")
-    for i in range(1,len(word_tokening)):
-        source_word += bytes(word_tokening[i][1]).decode("utf-8")
-    
-    return source_word
+class BytePairMaxHeap:
+    """
+    大顶堆，维护(pair, count)的降序，count相同时按pair的字典序排序
+    """
 
+    __slots__ = ['_heap']
 
-from sortedcontainers import SortedList
-from collections import Counter
-
-class BPEVocab:
     def __init__(self):
-        self.sorted_pairs = SortedList(key=lambda x: (-x[1], x[0]))
-        self.pair_counts = Counter()
-        
+        self._heap: List[_HeapItem] = []
+
+    def push(self, pair: Tuple[bytes, bytes], count: int) -> None:
+        """
+        压入一个新的pair
+        """
+        heapq.heappush(self._heap, _HeapItem(pair, count))
+
+    def pop_most_frequent(self) -> Optional[Tuple[Tuple[bytes, bytes], int]]:
+        """
+        弹出最频繁的pair
+        返回：pair, count
+        """
+        if not self._heap:
+            return None
+        item = heapq.heappop(self._heap)
+        return item.pair, item.count      
+
+    def __len__(self) -> int:
+        return len(self._heap)
+    
+    def is_empty(self) -> bool:
+        return len(self._heap) == 0
+
+class BPEVocab(BytePairMaxHeap):
+    def __init__(self):
+        """
+        继承__slots__类型的堆结构
+        外层构造dict类型，提高内存效率
+        """
+        super().__init__()
+        self.valid_counts = {}
+    
     def push(self, pair, count):
-        # 如果已存在，先删除
-        if pair in self.pair_counts:
-            old_count = self.pair_counts[pair]
-            self.sorted_pairs.remove((pair, old_count))
-        
-        # 添加新的
-        self.pair_counts[pair] = count
-        self.sorted_pairs.add((pair, count))
-        
-    def get_most_frequent(self):
-        if self.sorted_pairs:
-            return self.sorted_pairs[0]
+        self.valid_counts[pair] = count
+        super().push(pair, count)
+    
+    def pop_most_frequent_valid(self):
+        while self._heap:
+            pair, count = super().pop_most_frequent()
+            if self.valid_counts.get(pair, 0) == count:
+                return pair, count
         return None
 
-    def get_count_by_pair(self, pair):
-        """输入pair获取count"""
-        if pair in self.pair_counts:
-            return self.pair_counts[pair]
-        return 0
-
     def add_count(self, pair, count):
-        """基于某个pair增加coun，可以是负数"""
-        old_count = self.get_count_by_pair(pair)
+        """基于某个pair增加count，可以是负数"""
+        old_count = self.valid_counts.get(pair, 0)
         new_count = old_count + count if old_count + count > 0 else 0
         self.push(pair,new_count)
+    
+
 
 
 if __name__ == "__main__":
-    # candidate_list = [("A".encode("utf-8"), "B".encode("utf-8")), ("B".encode("utf-8"), "C".encode("utf-8")), ("C".encode("utf-8"), "ZZ".encode("utf-8")), ("ZZ".encode("utf-8"), "A".encode("utf-8"))]
-    # print(merge_bytepair_to_source_word(candidate_list))
-    # “A”, “B”), (“A”, “C”), (“B”, “ZZ”),and (“BA”, “A”)
 
-    # word = "widest"
-    # word_encoding = word.encode("utf-8")
-    # word_split = [word_encoding[i:i+1] for i in range(len(word_encoding))]
+    heap = BPEVocab() 
 
-    # word_tokenizing = []
-    # for i in range(len(word_split)-1):
-    #     print(word_split[i], type(word_split[i]))
-    #     byte_pair = BytePair(word_split[i], word_split[i+1])
-    #     word_tokenizing.append(byte_pair)
+    # 模拟 BPE 场景中的 n-gram pairs
+    data = [
+        ((b' a', b'nd'), 10),
+        ((b'e', b'r '), 5),
+        ((b' ', b'd'), 10),
+    ]
     
-    # print(word_tokenizing)
-
-    # 按字符拆分而不是按字节拆分
-    # word = "café"
-    #     # 直接按字符拆分
-    # word_split = [ch.encode("utf-8") for ch in word]
-    # print(word_split)
-        # 或者如果你需要字符本身而不是编码
-        # word_split = list(word)  # ['c', 'a', 'f', 'é']
-
-    # a = BPEVocab()
-    # a.add_count(pair=(b' th', b'e'), count=5)
-    # print(a.get_most_frequent())
-
-    # a.add_count(pair=(b' th', b'e'), count=-5)
-    # print(a.get_most_frequent())
-
-    # a.add_count(pair=(b' th', b'e'), count=7)
-    # print(a.get_most_frequent())
-
-    # print(a)
-    # sorted_pairs = SortedList(key=lambda x: (x[1], x[0]))
-    # sorted_pairs.add(((b' a', b'nd'), 609))
-    # print(sorted_pairs[-1]) # (b' a', b'nd')
-    # sorted_pairs.add(((b' ', b'd'), 609))
-    # print(sorted_pairs[-1]) # (b' ', b'd')
-    # sorted_pairs.add(((b' ', b'cd'), 608))
-    # print(sorted_pairs[-1]) # (b' ', b'd')
-    # sorted_pairs.add(((b'a ', b'd'), 606))
-    # print(sorted_pairs[-1]) # (b' ', b'd')
-    # sorted_pairs.add(((b' d', b'd'), 64))
-    # print(sorted_pairs[-1]) # (b' ', b'd')
-    # sorted_pairs.add(((b'ss ', b'd'), 60))
-    # print(sorted_pairs[-1]) # (b' ', b'd')
-
-    print("<|endoftext|>".encode("utf-8"))
+    for pair, count in data:
+        heap.push(pair, count)
+    
+    print("弹出顺序（应为先按 count 降序，count 相同按 pair 降序）：")
+    while not heap.is_empty():
+        pair, count = heap.pop_most_frequent()
+        print(f"  {pair} -> count={count}")
