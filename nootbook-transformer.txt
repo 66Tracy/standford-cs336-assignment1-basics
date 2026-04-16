@@ -1,0 +1,38 @@
+1、PyTorch的原子操作 @
+For instance, say we are doing a position-wise, batched operation. We have a “data tensor” D of shape
+(batch_size, sequence_length, d_model), and we would like to do a batched vector-matrix multiply
+against a matrix A of shape (d_model, d_model). In this case, D @ A will do a batched matrix multiply,
+which is an eﬀicient primitive in PyTorch, where the (batch_size, sequence_length) dimensions are
+batched over.
+
+所以经常要使用view、reshape、transpose来调整输入的形状
+
+2、einsum、einops、enix
+一个更高效（Ergonomic）的选择是在 torch.einsum 中使用 einsum 符号，或者更确切地说，使用像 einops 或 einx 这样与框架无关的库。
+这两个核心操作是：
+einsum：可以对输入张量的任意维度进行张量收缩（Tensor Contractions）🔢。
+
+rearrange：可以对任意维度进行重排、拼接和拆分。
+
+事实证明，机器学习中几乎所有的操作都是维度变换（Dimension Juggling）和张量收缩的某种组合，并偶尔伴随（通常是逐元素的）非线性函数。这意味着使用 einsum 符号可以让你的代码更具可读性和灵活性。
+
+我们强烈建议在本课程中学习并使用 einsum 符号。以前没有接触过 einsum 符号的学生应该使用 einops（文档见此），而已经熟练使用 einops 的学生则应该学习更通用的 einx（见此）。在我们提供的环境中，这两个包都已经预装好了。
+
+💡 为什么要学习这种符号？
+在深度学习中，处理多维张量（比如形状为 (B, H, W, C) 的图像数据）时，传统的 view、transpose 和 permute 操作往往会让代码变得难以阅读且容易出错。einsum 符号通过显式地标注维度名称（如 b h w c -> b c h w），让复杂的张量操作变得直观。
+
+
+3.3.1
+许多机器学习使用行向量，由此得到的表示形式与 NumPy 和 PyTorch 默认使用的行主序内存布局能够很好地契合。本课程使用列向量，因为能更好的学习。
+
+
+3.4.3
+最原始的transformer block将norm放在输出时，称为post-norm
+
+Pre-norm有更好的稳定性：将norm放在sub-layer输入前
+- sub-layer1: x + multi-head-attention(norm(x))
+- sub-layer2: x + feed-forward(norm(x))
+
+
+3.5.1
+后来norm都是用RMSbnorm；注意，进行norm之前需要将tensor扩展到float32，以防溢出
